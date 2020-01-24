@@ -1,0 +1,491 @@
+<html>
+
+<head>
+  <title>Augmented Reality Marker Detector</title>
+
+  <script type="text/javascript" src="libs/polyfill.js"></script> 
+  
+  <script type="text/javascript" src="cv.js"></script> 
+  <script type="text/javascript" src="aruco.js"></script> 
+  <script type="text/javascript" src="perspective-transform.js"></script>
+
+  <script>
+    var arucoCoords = [1308, 184, 1698, 182, 1701, 577, 1307, 575];
+    var pieceCoords = [1307, 610, 1701, 610, 1701, 1004, 1304, 1004];
+    var puzzleCoords = [95, 62, 1271, 65, 1271, 1004, 92, 1005];
+
+    var newPieceCoords = [0, 0, 0, 0, 0, 0, 0, 0];
+    var newPuzzleCoords = [0, 0, 0, 0, 0, 0, 0, 0];
+
+    var srcCorners = [0, 1, 0, 0, 1, 0, 1, 1];
+    var dstCorners = [564, 1468, 564, 1092, 939, 1092, 939, 1468];
+
+    var video, canvas, context, context2, imageData, detector;
+
+    var histograms = new Array(20 * 64); // using 64 bins per color histogram
+
+    var H2;
+
+    var tempHist = new Array(64);
+    for(var i = 0; i < 64; i++) {
+      tempHist[i] = i;
+    }
+
+    var sampleHist = [0, 0, 0, 0, 0, 0, 0, 0,
+                      0, 0, 0, 0, 0, 0, 0, 0,
+                      0, 0, 0, 0, 0, 35, 67, 243,
+                      13, 212, 79, 132, 0, 0, 0, 0,
+                      0, 0, 0, 0, 0, 0, 16, 201,
+                      5, 261, 470, 472, 0, 296, 83, 109,
+                      0, 0, 0, 0, 0, 0, 0, 0,
+                      0, 0, 3, 30, 0, 0, 17, 7256];
+
+    var basehist = [[857, 63, 24, 0, 0, 15, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 815, 37, 19, 0, 74, 245, 213, 58, 0, 0, 41, 103, 0, 0, 0, 64, 68, 0, 0, 0, 554, 47, 9, 1, 0, 29, 338, 35, 0, 0, 6, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 125, 23, 0, 0, 0, 14, 6065],
+    [1444, 44, 43, 0, 2, 52, 154, 0, 0, 1, 389, 754, 0, 0, 0, 0, 53, 0, 0, 0, 13, 210, 120, 0, 0, 25, 206, 276, 0, 0, 0, 0, 0, 0, 0, 0, 4, 12, 1, 0, 2, 87, 261, 45, 0, 0, 0, 41, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 0, 0, 0, 2, 5754],
+    [815, 76, 92, 0, 0, 12, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 71, 5, 75, 0, 133, 138, 147, 75, 0, 0, 12, 8, 0, 0, 0, 0, 0, 0, 0, 0, 355, 114, 1, 11, 107, 625, 247, 47, 0, 0, 0, 31, 0, 0, 0, 0, 0, 0, 0, 0, 0, 194, 17, 1, 0, 3, 12, 6573],
+    [1268, 75, 1, 0, 138, 126, 20, 0, 0, 0, 26, 279, 0, 0, 0, 0, 18, 2, 0, 0, 46, 342, 95, 0, 0, 3, 161, 429, 0, 0, 0, 11, 0, 0, 0, 0, 21, 22, 4, 0, 14, 73, 437, 141, 0, 0, 2, 157, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20, 11, 1, 0, 0, 8, 6049],
+    [896, 19, 0, 0, 296, 13, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 69, 2, 0, 0, 466, 338, 26, 0, 1, 11, 46, 6, 0, 0, 0, 0, 0, 0, 0, 0, 14, 37, 0, 0, 0, 54, 805, 35, 0, 0, 1, 36, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 185, 2, 0, 0, 15, 6626]];
+
+    function getBin(r, g, b) {
+      return (r >> 2) | (g >> 4) | (b >> 6);
+    }
+
+    function getClosestHist(hist) {
+      var result = {index:-1, dist:9999999};
+      //result.index = -1;
+
+      var isBlank = true;
+      for(var i = 0; i < 63; i++) {
+        if(hist[i] > 512) {
+          isBlank = false;
+          break;
+        }
+      }
+      if(isBlank == true && hist[63] > 2000) return result;
+
+      var minDist = 999999999.9;
+      for (var i = 0; i < 5; i++) {
+        var d = getHistDist(hist, basehist[i],64);
+        if (d < minDist) {
+          minDist = d;
+          result.index = i;
+        }
+      }
+      if (result.index != -1) result.dist = minDist;
+      return result;
+    }
+  
+    function getMousePos(canvasDom, mouseEvent) {
+      var rect = canvasDom.getBoundingClientRect();
+      return {
+        x: mouseEvent.clientX - rect.left,
+        y: mouseEvent.clientY - rect.top
+      };
+    }
+
+    function shoot() {
+      var H = PerspT(srcCorners, dstCorners);
+      var dstPt = H.transform(320, 240);      
+
+      // envia o valor
+      console.log("(" + ((dstPt[0]/720.0)-1) + "," + (1-dstPt[1]/1280) + ")");
+
+      var s = "x=" + parseInt(dstPt[0]) + "&y=" + parseInt(dstPt[1]) + "&p=1";
+
+      var xmlHttp = new XMLHttpRequest();
+      xmlHttp.open( "GET", "https://192.168.43.195:443/jsaruco/shoot.php?" + s, false); 
+      //xmlHttp.open( "GET", "https://www.cin.ufpe.br/~jmxnt/shooter/shoot.php?" + s, false); // 
+      // false for synchronous request
+      xmlHttp.send( null );
+      //return xmlHttp.responseText;
+
+    }
+
+    function onLoad(){
+      video = document.getElementById("video");
+      canvas = document.getElementById("canvas");
+      context = canvas.getContext("2d");
+
+      context2 = document.getElementById("c2").getContext("2d");
+      context2.fillStyle = "red";
+      context2.fillRect(0, 0, 100, 100);
+
+      var context3 = document.getElementById("trigger").getContext("2d");
+      context3.fillStyle = "green";
+      context3.fillRect(0, 0, 100, 100);
+
+      document.getElementById("trigger").addEventListener('click', function() {
+        //alert("teste");
+
+        var content = "[";
+        for(var i = 0; i < 63; i++) {
+          content += tempHist[i] + ", ";
+        }
+        content += tempHist[i];
+        content += "]";
+
+        document.getElementById("histotext").innerHTML = content;
+
+      }, false);
+
+      canvas.addEventListener("click", function (e) {
+        //alert("PEI click!");
+        shoot();
+      }, false);
+
+      /*canvas.addEventListener("touchstart", function (e) {
+        alert("PEI touch!");
+        shoot();
+      }, false);*/
+         
+      canvas.width = parseInt(canvas.style.width);
+      canvas.height = parseInt(canvas.style.height);
+
+      // Cross browser
+    navigator.getUserMedia = (navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia);
+    if (navigator.getUserMedia) {
+      // Request access to video only
+      navigator.getUserMedia(
+        {
+          video:{
+          facingMode: 'environment'  
+          },
+          audio:false
+        },    
+        function(stream) {
+          // Cross browser checks
+          var url = window.URL || window.webkitURL;
+              //v.src = url ? url.createObjectURL(stream) : stream;
+        video.srcObject = stream; 
+              // Set the video to play
+              video.play();
+        },
+        function(error) {
+          alert('Something went wrong. (error code ' + error.code + ')');
+          return;
+        }
+      );
+    }
+    else {
+      alert('Sorry, the browser you are using doesn\'t support getUserMedia');
+      return;
+    }
+
+    detector = new AR.Detector();
+
+        requestAnimationFrame(tick);
+      
+      /*navigator.getUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+      if (navigator.getUserMedia){
+        
+        function successCallback(stream){
+          if (window.webkitURL) {
+            //video.src = window.webkitURL.createObjectURL(stream);
+            video.srcObject=stream;
+            video.play();
+          } else if (video.mozSrcObject !== undefined) {
+            video.mozSrcObject = stream;
+          } else {
+            video.src = stream;
+          }
+        }
+        
+        function errorCallback(error){
+        }
+        
+        navigator.getUserMedia({video: true}, successCallback, errorCallback);
+        
+        detector = new AR.Detector();
+
+        requestAnimationFrame(tick);
+      }*/
+    }
+    
+    function tick(){
+      requestAnimationFrame(tick);
+      
+      if (video.readyState === video.HAVE_ENOUGH_DATA){
+        snapshot();
+
+        var markers = detector.detect(imageData);
+        drawCorners(markers);
+        drawId(markers);
+      }
+    }
+
+    function highlightPiece(ht, n) {
+      //[95, 62, 1271, 65, 1271, 1004, 92, 1005];
+
+      var deltax = (puzzleCoords[2] - puzzleCoords[0])/5; 
+      var deltay = (puzzleCoords[7] - puzzleCoords[1])/4;
+
+      var x = n % 5;
+      var y = Math.floor(n / 5);
+
+      var pts = [0,0,0,0,0,0,0,0];
+      pts[0] = puzzleCoords[0] + deltax * x;
+      pts[1] = puzzleCoords[1] + deltay * y;
+      pts[2] = pts[0] + deltax;
+      pts[3] = pts[1];
+      pts[4] = pts[2];
+      pts[5] = pts[1] + deltay;
+      pts[6] = pts[0];
+      pts[7] = pts[5]; 
+
+      for(var k = 0; k < 4; k++) {
+        var pt = ht.transform(pts[k*2+0], pts[k*2+1]);
+        //console.log(pt);
+        pts[k*2+0] = pt[0];
+        pts[k*2+1] = pt[1];
+
+      }
+
+      context.strokeStyle = "red";
+      context.beginPath();
+              
+      context.moveTo(pts[0], pts[1]);
+      context.lineTo(pts[2], pts[3]);
+      context.lineTo(pts[4], pts[5]);
+      context.lineTo(pts[6], pts[7]);
+      context.lineTo(pts[0], pts[1]);
+
+      context.stroke();
+      context.closePath();
+    }
+
+    function capturePiece() {
+      
+      //console.log("entrou no capture piece!");
+
+      var piece100 = [0,0,99,0,99,99,0,99];
+
+      var cidata = context.getImageData(0, 0, 640, 480);
+      var c2idata = context2.getImageData(0, 0, 100, 100);
+
+      var cdata = cidata.data;
+      var c2data = c2idata.data;
+
+      var H = PerspT(piece100, newPieceCoords);
+      //console.log(H);
+
+      for(var k = 0; k < 64; k++) {
+        tempHist[k] = 0;
+      }
+
+      for( var i = 0; i < 100; i++) {
+        for(var j = 0; j < 100; j++) {
+          
+          var dstPt = H.transform(j, i);
+
+          dstPt[0] = Math.round(dstPt[0]);
+          dstPt[1] = Math.round(dstPt[1]);
+
+          c2data[(i*100 + j)*4 + 0] = cdata[(dstPt[1]*640 + dstPt[0])*4 + 0] & 0xC0;
+          c2data[(i*100 + j)*4 + 1] = cdata[(dstPt[1]*640 + dstPt[0])*4 + 1] & 0xC0;
+          c2data[(i*100 + j)*4 + 2] = cdata[(dstPt[1]*640 + dstPt[0])*4 + 2] & 0xC0;
+          c2data[(i*100 + j)*4 + 3] = 255;//cdata[(dstPt[1]*640 + dstPt[0])*4 + 3];
+
+          var bin = getBin(c2data[(i*100 + j)*4 + 2], c2data[(i*100 + j)*4 + 1], c2data[(i*100 + j)*4 + 0]);
+          tempHist[bin] += 1;
+        }
+      }
+
+      //console.log(sampleHist);
+      var piece = getClosestHist(tempHist);
+      if(piece.index != -1) {
+        highlightPiece(H2, piece.index);
+        console.log(piece);
+      }
+
+      //console.log(getHistDist(sampleHist, tempHist, 64));      
+
+      context2.putImageData(c2idata, 0, 0);
+
+    }
+
+    function getHistDist(hist1, hist2, numBins) {
+      var result = 0;
+      for (var i = 0; i < numBins-1; i++) {
+        result += (hist1[i] - hist2[i])*(hist1[i] - hist2[i]);
+      }
+      return result;
+    }
+
+    function snapshot(){
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+    }
+          
+    function drawCorners(markers){
+      var corners, corner, i, j;
+    
+      context.lineWidth = 3;
+
+      // context.strokeStyle = "green";
+      // context.beginPath();
+      // context.moveTo(320, 240-5);
+      // context.lineTo(320, 240+5);
+
+      // context.moveTo(320-5, 240);
+      // context.lineTo(320+5, 240);
+      // context.stroke();
+      // context.closePath();
+
+      for (i = 0; i !== markers.length; ++ i){
+        corners = markers[i].corners;
+        
+        context.strokeStyle = "red";
+        context.beginPath();
+        
+        for (j = 0; j !== corners.length; ++ j){
+          corner = corners[j];
+          context.moveTo(corner.x, corner.y);
+          corner = corners[(j + 1) % corners.length];
+          context.lineTo(corner.x, corner.y);
+          //console.log("(" + corner.x + "," + corner.y + ") ");
+        }
+
+        context.stroke();
+        context.closePath();
+
+        //console.log("\n");
+
+        context.strokeStyle = "red";
+        context.strokeRect(corners[0].x - 2, corners[0].y - 2, 4, 4);
+
+        context.strokeStyle = "yellow";
+        context.strokeRect(corners[1].x - 2, corners[1].y - 2, 4, 4);
+
+        context.strokeStyle = "blue";
+        context.strokeRect(corners[2].x - 2, corners[2].y - 2, 4, 4);
+
+        context.strokeStyle = "green";
+        context.strokeRect(corners[3].x - 2, corners[3].y - 2, 4, 4);
+
+        srcCorners[0] = corners[0].x;
+        srcCorners[1] = corners[0].y;
+        srcCorners[2] = corners[1].x;
+        srcCorners[3] = corners[1].y;
+        srcCorners[4] = corners[2].x;
+        srcCorners[5] = corners[2].y;
+        srcCorners[6] = corners[3].x;
+        srcCorners[7] = corners[3].y;
+
+        H2 = PerspT(arucoCoords, srcCorners);
+        //console.log(H);
+        //console.log("(" + pieceCoords[0] + ","+ pieceCoords[1] + ")");
+
+        //var dstPt = H.transform(pieceCoords[0], pieceCoords[1]);
+        //console.log(dstPt);  
+
+        for(var k = 0; k < 4; k++) {
+
+          var pt = H2.transform(pieceCoords[k*2+0], pieceCoords[k*2+1]);
+          //console.log(pt);
+          newPieceCoords[k*2+0] = pt[0];
+          newPieceCoords[k*2+1] = pt[1];
+
+        }
+
+        for(var k = 0; k < 4; k++) {
+
+          var pt = H2.transform(puzzleCoords[k*2+0], puzzleCoords[k*2+1]);
+          //console.log(pt);
+          newPuzzleCoords[k*2+0] = pt[0];
+          newPuzzleCoords[k*2+1] = pt[1];
+
+        }
+
+        context.strokeStyle = "red";
+        context.beginPath();
+                
+        // context.moveTo(newPieceCoords[0], newPieceCoords[1]);
+        // context.lineTo(newPieceCoords[2], newPieceCoords[3]);
+        // context.lineTo(newPieceCoords[4], newPieceCoords[5]);
+        // context.lineTo(newPieceCoords[6], newPieceCoords[7]);
+        // context.lineTo(newPieceCoords[0], newPieceCoords[1]);
+
+        context.strokeStyle = "blue";
+
+        context.moveTo(newPuzzleCoords[0], newPuzzleCoords[1]);
+        context.lineTo(newPuzzleCoords[2], newPuzzleCoords[3]);
+        context.lineTo(newPuzzleCoords[4], newPuzzleCoords[5]);
+        context.lineTo(newPuzzleCoords[6], newPuzzleCoords[7]);
+        context.lineTo(newPuzzleCoords[0], newPuzzleCoords[1]);
+
+        //console.log(newPieceCoords[0] + " " + newPieceCoords[1] + " " + newPieceCoords[2] + " " + newPieceCoords[3]); 
+
+        context.stroke();
+        context.closePath();
+
+        capturePiece();
+
+
+        // context.strokeStyle = "red";
+        // context.beginPath();
+
+        // context.moveTo(newPieceCoords[0], newPieceCoords[1]);
+        // context.lineTo(newPieceCoords[2], newPieceCoords[3]);
+        // context.lineTo(newPieceCoords[4], newPieceCoords[5]);
+        // context.lineTo(newPieceCoords[6], newPieceCoords[7]);
+        // context.lineTo(newPieceCoords[0], newPieceCoords[1]);
+
+        // context.stroke();
+        // context.closePath();
+
+        //var H = PerspT(srcCorners, dstCorners);
+        //var dstPt = H.transform(320, 240);
+
+        //if(dstPt[0] < 0 || dstPt[0] > 1440 || dstPt[1] < 0 || dstPt[1] > 2560) {
+        //  return;
+        //}
+
+        //console.log("(" + ((dstPt[0]/720.0)-1) + "," + (1-dstPt[1]/1280) + ")");
+
+      }
+    }
+
+    function drawId(markers){
+      var corners, corner, x, y, i, j;
+      
+      context.strokeStyle = "blue";
+      context.lineWidth = 1;
+      
+      for (i = 0; i !== markers.length; ++ i){
+        corners = markers[i].corners;
+        
+        x = Infinity;
+        y = Infinity;
+        
+        for (j = 0; j !== corners.length; ++ j){
+          corner = corners[j];
+          
+          x = Math.min(x, corner.x);
+          y = Math.min(y, corner.y);
+        }
+
+        context.strokeText(markers[i].id, x, y)
+      }
+    }
+
+    window.onload = onLoad;
+  </script>
+
+</head>
+
+<body style="font-family: monospace;">
+
+  <center>
+    <div style="margin: 10px;"><strong>-= Augmented Reality Marker Detector =-</strong></div>
+    <video id="video" autoplay="true" style="display:none;"></video>
+    <canvas id="canvas" style="width:640px; height:480px;"></canvas>
+    <canvas id='trigger' width="100" height="100" bgcolor="green"></canvas>
+    <canvas id='c2' width="100" height="100"></canvas>
+    <br><br><br>
+    <div id='histotext'></div>
+    <div style="margin: 15px;"><strong>Powered by <a href="http://code.google.com/p/js-aruco/">js-aruco</a></strong></div>
+  </center>
+
+</body>
+  
+</html>
